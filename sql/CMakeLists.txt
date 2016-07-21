@@ -116,7 +116,7 @@ SET (SQL_SOURCE
                rpl_tblmap.cc sql_binlog.cc event_scheduler.cc event_data_objects.cc
                event_queue.cc event_db_repository.cc 
                sql_tablespace.cc events.cc ../sql-common/my_user.c 
-               partition_info.cc rpl_utility.cc rpl_injector.cc sql_locale.cc
+               partition_info.cc rpl_utility.cc rpl_injector.cc 
                rpl_rli.cc rpl_mi.cc sql_servers.cc sql_audit.cc
                sql_connect.cc scheduler.cc sql_partition_admin.cc
                sql_profile.cc event_parse_data.cc sql_alter.cc
@@ -151,9 +151,9 @@ IF (CMAKE_SYSTEM_NAME MATCHES "Linux" OR
     HAVE_KQUEUE)
  ADD_DEFINITIONS(-DHAVE_POOL_OF_THREADS)
  IF(WIN32)
-   SET(SQL_SOURCE ${SQL_SOURCE} threadpool_win.cc)
+   SET(SQL_SOURCE ${SQL_SOURCE} threadpool_win.cc sql_locale_win.cc)
  ELSE()
-   SET(SQL_SOURCE ${SQL_SOURCE} threadpool_unix.cc)
+   SET(SQL_SOURCE ${SQL_SOURCE} threadpool_unix.cc sql_locale.cc)
  ENDIF()
 ENDIF()
 
