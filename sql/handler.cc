@@ -296,7 +296,7 @@ handler *get_ha_partition(partition_info *part_info)
 static const char **handler_errmsgs;
 
 C_MODE_START
-static const char **get_handler_errmsgs()
+static const char **get_handler_errmsgs(void)
 {
   return handler_errmsgs;
 }
@@ -1360,7 +1360,8 @@ int ha_commit_trans(THD *thd, bool all)
 
   uint rw_ha_count= ha_check_and_coalesce_trx_read_only(thd, ha_info, all);
   /* rw_trans is TRUE when we in a transaction changing data */
-  bool rw_trans= is_real_trans && (rw_ha_count > 0);
+  bool rw_trans= is_real_trans &&
+                 (rw_ha_count > !thd->is_current_stmt_binlog_disabled());
   MDL_request mdl_request;
   DBUG_PRINT("info", ("is_real_trans: %d  rw_trans:  %d  rw_ha_count: %d",
                       is_real_trans, rw_trans, rw_ha_count));
@@ -2733,6 +2734,15 @@ int handler::ha_index_next_same(uchar *buf, const uchar *key, uint keylen)
   if (!result)
     update_index_statistics();
   table->status=result ? STATUS_NOT_FOUND: 0;
+  return result;
+}
+
+
+bool handler::ha_was_semi_consistent_read()
+{
+  bool result= was_semi_consistent_read();
+  if (result)
+    increment_statistics(&SSV::ha_read_retry_count);
   return result;
 }
 
@@ -5865,6 +5875,26 @@ int handler::ha_reset()
 }
 
 
+static int check_wsrep_max_ws_rows()
+{
+#ifdef WITH_WSREP
+  if (wsrep_max_ws_rows)
+  {
+    THD *thd= current_thd;
+    thd->wsrep_affected_rows++;
+    if (thd->wsrep_exec_mode != REPL_RECV &&
+        thd->wsrep_affected_rows > wsrep_max_ws_rows)
+    {
+      trans_rollback_stmt(thd) || trans_rollback(thd);
+      my_message(ER_ERROR_DURING_COMMIT, "wsrep_max_ws_rows exceeded", MYF(0));
+      return ER_ERROR_DURING_COMMIT;
+    }
+  }
+#endif /* WITH_WSREP */
+  return 0;
+}
+
+
 int handler::ha_write_row(uchar *buf)
 {
   int error;
@@ -5889,7 +5919,7 @@ int handler::ha_write_row(uchar *buf)
     DBUG_RETURN(error); /* purecov: inspected */
 
   DEBUG_SYNC_C("ha_write_row_end");
-  DBUG_RETURN(0);
+  DBUG_RETURN(check_wsrep_max_ws_rows());
 }
 
 
@@ -5920,7 +5950,7 @@ int handler::ha_update_row(const uchar *old_data, uchar *new_data)
   rows_changed++;
   if (unlikely(error= binlog_log_row(table, old_data, new_data, log_func)))
     return error;
-  return 0;
+  return check_wsrep_max_ws_rows();
 }
 
 int handler::ha_delete_row(const uchar *buf)
@@ -5947,7 +5977,7 @@ int handler::ha_delete_row(const uchar *buf)
   rows_changed++;
   if (unlikely(error= binlog_log_row(table, buf, 0, log_func)))
     return error;
-  return 0;
+  return check_wsrep_max_ws_rows();
 }
 
 
@@ -6078,7 +6108,10 @@ int ha_abort_transaction(THD *bf_thd, THD *victim_thd, my_bool signal)
     DBUG_RETURN(0);
   }
 
-  THD_TRANS *trans= &victim_thd->transaction.all;
+  /* Try statement transaction if standard one is not set. */
+  THD_TRANS *trans= (victim_thd->transaction.all.ha_list) ?
+    &victim_thd->transaction.all : &victim_thd->transaction.stmt;
+
   Ha_trx_info *ha_info= trans->ha_list, *ha_info_next;
 
   for (; ha_info; ha_info= ha_info_next)
@@ -6086,8 +6119,8 @@ int ha_abort_transaction(THD *bf_thd, THD *victim_thd, my_bool signal)
     handlerton *hton= ha_info->ht();
     if (!hton->abort_transaction)
     {
-      /* Skip warning for binlog SE */
-      if (hton->db_type != DB_TYPE_BINLOG)
+      /* Skip warning for binlog & wsrep. */
+      if (hton->db_type != DB_TYPE_BINLOG && hton != wsrep_hton)
       {
         WSREP_WARN("Cannot abort transaction.");
       }
