@@ -531,7 +531,6 @@ public:
   virtual st_select_lex* outer_select()= 0;
   virtual st_select_lex* return_after_parsing()= 0;
 
-  virtual bool set_braces(bool value);
   virtual bool inc_in_sum_expr();
   virtual uint get_in_sum_expr();
   virtual TABLE_LIST* get_table_list();
@@ -740,6 +739,21 @@ public:
 typedef class st_select_lex_unit SELECT_LEX_UNIT;
 typedef Bounds_checked_array<Item*> Ref_ptr_array;
 
+
+/*
+  Structure which consists of the field and the item which 
+  produces this field.
+*/
+
+class Grouping_tmp_field :public Sql_alloc
+{
+public:
+  Field *tmp_field;
+  Item *producing_item;
+  Grouping_tmp_field(Field *fld, Item *item) 
+     :tmp_field(fld), producing_item(item) {}
+};
+
 /*
   SELECT_LEX - store information of parsed SELECT statment
 */
@@ -751,6 +765,8 @@ public:
   Item *where, *having;                         /* WHERE & HAVING clauses */
   Item *prep_where; /* saved WHERE clause for prepared statement processing */
   Item *prep_having;/* saved HAVING clause for prepared statement processing */
+  Item *cond_pushed_into_where;  /* condition pushed into the select's WHERE  */
+  Item *cond_pushed_into_having; /* condition pushed into the select's HAVING */
   /* Saved values of the WHERE and HAVING clauses*/
   Item::cond_result cond_value, having_value;
   /* point on lex in which it was created, used in view subquery detection */
@@ -924,8 +940,9 @@ public:
 
   /* namp of nesting SELECT visibility (for aggregate functions check) */
   nesting_map name_visibility_map;
-
+  
   table_map with_dep;
+  List<Grouping_tmp_field> grouping_tmp_fields;
 
   /* it is for correct printing SELECT options */
   thr_lock_type lock_type;
@@ -955,7 +972,10 @@ public:
 
   bool mark_as_dependent(THD *thd, st_select_lex *last, Item *dependency);
 
-  bool set_braces(bool value);
+  void set_braces(bool value)
+  {
+    braces= value;
+  }
   bool inc_in_sum_expr();
   uint get_in_sum_expr();
 
@@ -1115,6 +1135,11 @@ public:
   With_element *find_table_def_in_with_clauses(TABLE_LIST *table);
   bool check_unrestricted_recursive(bool only_standards_compliant); 
   bool check_subqueries_with_recursive_references();
+  void collect_grouping_fields(THD *thd); 
+  void check_cond_extraction_for_grouping_fields(Item *cond,
+                                                 Item_processor processor);
+  Item *build_cond_for_grouping_fields(THD *thd, Item *cond,
+				       bool no_to_clones);
   
   List<Window_spec> window_specs;
   void prepare_add_window_spec(THD *thd);
@@ -1134,6 +1159,9 @@ public:
 
   bool have_window_funcs() const { return (window_funcs.elements !=0); }
 
+  bool cond_pushdown_is_allowed() const
+  { return !have_window_funcs() && !olap; }
+  
 private:
   bool m_non_agg_field_used;
   bool m_agg_func_used;
@@ -3228,6 +3256,7 @@ public:
     m_yacc.reset();
   }
 };
+
 
 extern sql_digest_state *
 digest_add_token(sql_digest_state *state, uint token, LEX_YYSTYPE yylval);

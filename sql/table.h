@@ -1021,13 +1021,14 @@ private:
      One should use methods of I_P_List template instead.
   */
   TABLE *share_all_next, **share_all_prev;
+  TABLE *global_free_next, **global_free_prev;
   friend struct All_share_tables;
+  friend struct Table_cache_instance;
 
 public:
 
+  uint32 instance; /** Table cache instance this TABLE is belonging to */
   THD	*in_use;                        /* Which thread uses this */
-  /* Time when table was released to table cache. Valid for unused tables. */
-  ulonglong tc_time;
   Field **field;			/* Pointer to fields */
 
   uchar *record[2];			/* Pointer to records */
@@ -2344,6 +2345,8 @@ struct TABLE_LIST
     return false;
   } 
   void set_lock_type(THD* thd, enum thr_lock_type lock);
+  void check_pushable_cond_for_table(Item *cond);
+  Item *build_pushable_cond_for_table(THD *thd, Item *cond); 
 
 private:
   bool prep_check_option(THD *thd, uint8 check_opt_type);

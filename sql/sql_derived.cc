@@ -480,8 +480,6 @@ unconditional_materialization:
   derived->set_materialized_derived();
   if (!derived->table || !derived->table->is_created())
     res= mysql_derived_create(thd, lex, derived);
-  if (!res)
-    res= mysql_derived_fill(thd, lex, derived);
   goto exit_merge;
 }
 
@@ -918,7 +916,7 @@ bool mysql_derived_create(THD *thd, LEX *lex, TABLE_LIST *derived)
 
   if (table->is_created())
     DBUG_RETURN(FALSE);
-  select_union *result= (select_union*)unit->result;
+  select_union *result= derived->derived_result;
   if (table->s->db_type() == TMP_ENGINE_HTON)
   {
     result->tmp_table_param.keyinfo= table->s->key_info;
@@ -1100,3 +1098,155 @@ bool mysql_derived_reinit(THD *thd, LEX *lex, TABLE_LIST *derived)
   unit->set_thd(thd);
   DBUG_RETURN(FALSE);
 }
+
+
+/**
+  @brief
+  Extract the condition depended on derived table/view and pushed it there 
+   
+  @param thd       The thread handle
+  @param cond      The condition from which to extract the pushed condition 
+  @param derived   The reference to the derived table/view
+
+  @details
+   This functiom builds the most restrictive condition depending only on
+   the derived table/view that can be extracted from the condition cond. 
+   The built condition is pushed into the having clauses of the
+   selects contained in the query specifying the derived table/view.
+   The function also checks for each select whether any condition depending
+   only on grouping fields can be extracted from the pushed condition.
+   If so, it pushes the condition over grouping fields into the where
+   clause of the select.
+  
+  @retval
+    true    if an error is reported 
+    false   otherwise
+*/
+
+bool pushdown_cond_for_derived(THD *thd, Item *cond, TABLE_LIST *derived)
+{
+  if (!cond)
+    return false;
+
+  st_select_lex_unit *unit= derived->get_unit();
+  st_select_lex *sl= unit->first_select();
+
+  /* Check whether any select of 'unit' allows condition pushdown */
+  bool any_select_allows_cond_pushdown= false;
+  for (; sl; sl= sl->next_select())
+  {
+    if (sl->cond_pushdown_is_allowed())
+    {
+      any_select_allows_cond_pushdown= true;
+      break;
+    }
+  }
+  if (!any_select_allows_cond_pushdown)
+    return false; 
+
+  /* Do not push conditions into constant derived */
+  if (unit->executed)
+    return false;
+
+  /* Do not push conditions into recursive with tables */
+  if (derived->is_recursive_with_table())
+    return false;
+
+  /*
+    Build the most restrictive condition extractable from 'cond'
+    that can be pushed into the derived table 'derived'.
+    All subexpressions of this condition are cloned from the
+    subexpressions of 'cond'.
+    This condition has to be fixed yet.
+  */
+  Item *extracted_cond;
+  derived->check_pushable_cond_for_table(cond);
+  extracted_cond= derived->build_pushable_cond_for_table(thd, cond);
+  if (!extracted_cond)
+  {
+    /* Nothing can be pushed into the derived table */
+    return false;
+  }
+  /* Push extracted_cond into every select of the unit specifying 'derived' */
+  st_select_lex *save_curr_select= thd->lex->current_select;
+  for (; sl; sl= sl->next_select())
+  {
+    if (!sl->cond_pushdown_is_allowed())
+      continue;
+    thd->lex->current_select= sl;
+    /*
+      For each select of the unit except the last one
+      create a clone of extracted_cond
+    */
+    Item *extracted_cond_copy= !sl->next_select() ? extracted_cond :
+                               extracted_cond->build_clone(thd, thd->mem_root);
+    if (!extracted_cond_copy)
+      continue;
+
+    if (!sl->join->group_list && !sl->with_sum_func)
+    {
+      /* extracted_cond_copy is pushed into where of sl */
+      extracted_cond_copy= extracted_cond_copy->transform(thd,
+                                 &Item::derived_field_transformer_for_where,
+                                 (uchar*) sl);
+      if (extracted_cond_copy)
+      {
+       extracted_cond_copy->walk(&Item::cleanup_processor, 0, 0);
+       sl->cond_pushed_into_where= extracted_cond_copy;
+      }      
+  
+      continue;
+    }
+
+    /*
+      Figure out what can be extracted from the pushed condition
+      that could be pushed into the where clause of sl
+    */
+    Item *cond_over_grouping_fields;
+    sl->collect_grouping_fields(thd);
+    sl->check_cond_extraction_for_grouping_fields(extracted_cond_copy,
+              &Item::exclusive_dependence_on_grouping_fields_processor);
+    cond_over_grouping_fields=
+      sl->build_cond_for_grouping_fields(thd, extracted_cond_copy, true);
+  
+    /*
+      Transform the references to the 'derived' columns from the condition
+      pushed into the where clause of sl to make them usable in the new context
+    */
+    if (cond_over_grouping_fields)
+      cond_over_grouping_fields= cond_over_grouping_fields->transform(thd,
+                         &Item::derived_grouping_field_transformer_for_where,
+                         (uchar*) sl);
+     
+    if (cond_over_grouping_fields)
+    {
+      /*
+        In extracted_cond_copy remove top conjuncts that
+        has been pushed into the where clause of sl
+      */
+      extracted_cond_copy= remove_pushed_top_conjuncts(thd, extracted_cond_copy);
+  
+      cond_over_grouping_fields->walk(&Item::cleanup_processor, 0, 0);
+      sl->cond_pushed_into_where= cond_over_grouping_fields;
+
+      if (!extracted_cond_copy)
+        continue;
+    }
+    
+    /*
+      Transform the references to the 'derived' columns from the condition
+      pushed into the having clause of sl to make them usable in the new context
+    */
+    extracted_cond_copy= extracted_cond_copy->transform(thd,
+                         &Item::derived_field_transformer_for_having,
+                         (uchar*) sl);
+    if (!extracted_cond_copy)
+      continue;
+
+    extracted_cond_copy->walk(&Item::cleanup_processor, 0, 0);
+    sl->cond_pushed_into_having= extracted_cond_copy;
+  }
+  thd->lex->current_select= save_curr_select;
+  return false;
+}
+

@@ -580,7 +580,8 @@ The following options may be given as the first argument:
  semijoin_with_cache, join_cache_incremental, 
  join_cache_hashed, join_cache_bka, 
  optimize_join_buffer_size, table_elimination, 
- extended_keys, exists_to_in, orderby_uses_equalities
+ extended_keys, exists_to_in, orderby_uses_equalities, 
+ condition_pushdown_for_derived
  --optimizer-use-condition-selectivity=# 
  Controls selectivity of which conditions the optimizer
  takes into account to calculate cardinality of a partial
@@ -1090,6 +1091,8 @@ The following options may be given as the first argument:
  The number of cached table definitions
  --table-open-cache=# 
  The number of cached open tables
+ --table-open-cache-instances=# 
+ Maximum number of table cache instances
  --tc-heuristic-recover=name 
  Decision to use in heuristic recover process. One of: OFF,
  COMMIT, ROLLBACK
@@ -1328,7 +1331,7 @@ old-style-user-limits FALSE
 optimizer-prune-level 1
 optimizer-search-depth 62
 optimizer-selectivity-sampling-limit 100
-optimizer-switch index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,index_merge_sort_intersection=off,engine_condition_pushdown=off,index_condition_pushdown=on,derived_merge=on,derived_with_keys=on,firstmatch=on,loosescan=on,materialization=on,in_to_exists=on,semijoin=on,partial_match_rowid_merge=on,partial_match_table_scan=on,subquery_cache=on,mrr=off,mrr_cost_based=off,mrr_sort_keys=off,outer_join_with_cache=on,semijoin_with_cache=on,join_cache_incremental=on,join_cache_hashed=on,join_cache_bka=on,optimize_join_buffer_size=off,table_elimination=on,extended_keys=on,exists_to_in=on
+optimizer-switch index_merge=on,index_merge_union=on,index_merge_sort_union=on,index_merge_intersection=on,index_merge_sort_intersection=off,engine_condition_pushdown=off,index_condition_pushdown=on,derived_merge=on,derived_with_keys=on,firstmatch=on,loosescan=on,materialization=on,in_to_exists=on,semijoin=on,partial_match_rowid_merge=on,partial_match_table_scan=on,subquery_cache=on,mrr=off,mrr_cost_based=off,mrr_sort_keys=off,outer_join_with_cache=on,semijoin_with_cache=on,join_cache_incremental=on,join_cache_hashed=on,join_cache_bka=on,optimize_join_buffer_size=off,table_elimination=on,extended_keys=on,exists_to_in=on,orderby_uses_equalities=off,condition_pushdown_for_derived=on
 optimizer-use-condition-selectivity 1
 performance-schema FALSE
 performance-schema-accounts-size -1
@@ -1456,6 +1459,7 @@ sysdate-is-now FALSE
 table-cache 431
 table-definition-cache 400
 table-open-cache 431
+table-open-cache-instances 8
 tc-heuristic-recover OFF
 thread-cache-size 151
 thread-pool-idle-timeout 60

@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
    Copyright (c) 2010, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
@@ -878,8 +878,7 @@ void close_thread_table(THD *thd, TABLE **table_ptr)
     Do this *before* entering the TABLE_SHARE::tdc.LOCK_table_share
     critical section.
   */
-  if (table->file != NULL)
-    MYSQL_UNBIND_TABLE(table->file);
+  MYSQL_UNBIND_TABLE(table->file);
 
   tc_release_table(table);
   DBUG_VOID_RETURN;
@@ -4211,6 +4210,15 @@ handle_view(THD *thd, Query_tables_list *prelocking_ctx,
                                  &table_list->view->sroutines_list,
                                  table_list->top_table());
   }
+
+  /*
+    If a trigger was defined on one of the associated tables then assign the
+    'trg_event_map' value of the view to the next table in table_list. When a
+    Stored function is invoked, all the associated tables including the tables
+    associated with the trigger are prelocked.
+  */
+  if (table_list->trg_event_map && table_list->next_global)
+    table_list->next_global->trg_event_map= table_list->trg_event_map;
   return FALSE;
 }
 

@@ -695,7 +695,7 @@ JOIN::prepare(TABLE_LIST *tables_init,
   DBUG_ENTER("JOIN::prepare");
 
   // to prevent double initialization on EXPLAIN
-  if (optimized)
+  if (optimization_state != JOIN::NOT_OPTIMIZED)
     DBUG_RETURN(0);
 
   conds= conds_init;
@@ -1068,24 +1068,13 @@ err:
 
 int JOIN::optimize()
 {
-  bool was_optimized= optimized;
+  // to prevent double initialization on EXPLAIN
+  if (optimization_state != JOIN::NOT_OPTIMIZED)
+    return FALSE;
+  optimization_state= JOIN::OPTIMIZATION_IN_PROGRESS;
+
   int res= optimize_inner();
-  /*
-    If we're inside a non-correlated subquery, this function may be 
-    called for the second time after the subquery has been executed
-    and deleted. The second call will not produce a valid query plan, it will
-    short-circuit because optimized==TRUE.
-
-    "was_optimized != optimized" is here to handle this case:
-      - first optimization starts, gets an error (from a const. cheap
-        subquery), returns 1
-      - another JOIN::optimize() call made, and now join->optimize() will
-        return 0, even though we never had a query plan.
-
-    Can have QEP_NOT_PRESENT_YET for degenerate queries (for example,
-    SELECT * FROM tbl LIMIT 0)
-  */
-  if (was_optimized != optimized && !res && have_query_plan != QEP_DELETED)
+  if (!res && have_query_plan != QEP_DELETED)
   {
     create_explain_query_if_not_exists(thd->lex, thd->mem_root);
     have_query_plan= QEP_AVAILABLE;
@@ -1112,6 +1101,7 @@ int JOIN::optimize()
     }
     
   }
+  optimization_state= JOIN::OPTIMIZATION_DONE;
   return res;
 }
 
@@ -1131,26 +1121,21 @@ int JOIN::optimize()
 int
 JOIN::optimize_inner()
 {
+/*
+    if (conds) { Item *it_clone= conds->build_clone(thd,thd->mem_root); }
+*/
   ulonglong select_opts_for_readinfo;
   uint no_jbuf_after;
   JOIN_TAB *tab;
   DBUG_ENTER("JOIN::optimize");
-
   do_send_rows = (unit->select_limit_cnt) ? 1 : 0;
-  // to prevent double initialization on EXPLAIN
-  if (optimized)
-    DBUG_RETURN(0);
-  optimized= 1;
+
   DEBUG_SYNC(thd, "before_join_optimize");
 
   THD_STAGE_INFO(thd, stage_optimizing);
 
   set_allowed_join_cache_types();
   need_distinct= TRUE;
-
-  /* Run optimize phase for all derived tables/views used in this SELECT. */
-  if (select_lex->handle_derived(thd->lex, DT_OPTIMIZE))
-    DBUG_RETURN(1);
 
   if (select_lex->first_cond_optimization)
   {
@@ -1264,8 +1249,49 @@ JOIN::optimize_inner()
   if (setup_jtbm_semi_joins(this, join_list, &conds))
     DBUG_RETURN(1);
 
+  if (select_lex->cond_pushed_into_where)
+  {
+    conds= and_conds(thd, conds, select_lex->cond_pushed_into_where);
+    if (conds && conds->fix_fields(thd, &conds))
+      DBUG_RETURN(1);
+  }
+  if (select_lex->cond_pushed_into_having)
+  {
+    having= and_conds(thd, having, select_lex->cond_pushed_into_having);
+    if (having)
+    {
+      select_lex->having_fix_field= 1;
+      if (having->fix_fields(thd, &having))
+        DBUG_RETURN(1);
+      select_lex->having_fix_field= 0;
+    }
+  }
+  
   conds= optimize_cond(this, conds, join_list, FALSE,
                        &cond_value, &cond_equal, OPT_LINK_EQUAL_FIELDS);
+  
+  if (thd->lex->sql_command == SQLCOM_SELECT &&
+      optimizer_flag(thd, OPTIMIZER_SWITCH_COND_PUSHDOWN_FOR_DERIVED))
+  {
+    TABLE_LIST *tbl;
+    List_iterator_fast<TABLE_LIST> li(select_lex->leaf_tables);
+    while ((tbl= li++))
+    {
+      if (tbl->is_materialized_derived())
+      {
+        if (pushdown_cond_for_derived(thd, conds, tbl))
+	  DBUG_RETURN(1);
+	if (mysql_handle_single_derived(thd->lex, tbl, DT_OPTIMIZE))
+	  DBUG_RETURN(1);
+      }
+    }
+  }
+  else
+  {
+    /* Run optimize phase for all derived tables/views used in this SELECT. */
+    if (select_lex->handle_derived(thd->lex, DT_OPTIMIZE))
+      DBUG_RETURN(1);
+  }
      
   if (thd->is_error())
   {
@@ -3169,6 +3195,7 @@ void JOIN::exec_inner()
 {
   List<Item> *columns_list= &fields_list;
   DBUG_ENTER("JOIN::exec_inner");
+  DBUG_ASSERT(optimization_state == JOIN::OPTIMIZATION_DONE);
 
   THD_STAGE_INFO(thd, stage_executing);
 
@@ -15757,7 +15784,7 @@ Field *Item::create_tmp_field(bool group, TABLE *table, uint convert_int_length)
       Field_double(max_length, maybe_null, name, decimals, TRUE);
     break;
   case INT_RESULT:
-    /* 
+    /*
       Select an integer type with the minimal fit precision.
       convert_int_length is sign inclusive, don't consider the sign.
     */
@@ -15773,7 +15800,6 @@ Field *Item::create_tmp_field(bool group, TABLE *table, uint convert_int_length)
     break;
   case STRING_RESULT:
     DBUG_ASSERT(collation.collation);
-  
     /*
       GEOMETRY fields have STRING_RESULT result type.
       To preserve type they needed to be handled separately.
@@ -26212,6 +26238,61 @@ AGGR_OP::end_send()
   return rc;
 }
 
+
+/**
+  @brief
+  Remove marked top conjuncts of a condition
+    
+  @param thd    The thread handle
+  @param cond   The condition which subformulas are to be removed    
+
+  @details
+    The function removes all top conjuncts marked with the flag
+    FULL_EXTRACTION_FL from the condition 'cond'. The resulting
+    formula is returned a the result of the function
+    If 'cond' s marked with such flag the function returns 0. 
+    The function clear the extraction flags for the removed
+    formulas
+
+   @retval
+     condition without removed subformulas
+     0 if the whole 'cond' is removed
+*/ 
+
+Item *remove_pushed_top_conjuncts(THD *thd, Item *cond)
+{
+  if (cond->get_extraction_flag() == FULL_EXTRACTION_FL)
+  {
+    cond->clear_extraction_flag();
+    return 0; 
+  }
+  if (cond->type() == Item::COND_ITEM)
+  {
+    if (((Item_cond*) cond)->functype() == Item_func::COND_AND_FUNC)
+    {
+      List_iterator<Item> li(*((Item_cond*) cond)->argument_list());
+      Item *item;
+      while ((item= li++))
+      {
+	if (item->get_extraction_flag() == FULL_EXTRACTION_FL)
+	{
+	  item->clear_extraction_flag();
+	  li.remove();
+	}
+      }
+      switch (((Item_cond*) cond)->argument_list()->elements) 
+      {
+      case 0:
+	return 0;			
+      case 1:
+	return ((Item_cond*) cond)->argument_list()->head();
+      default:
+	return cond;
+      }
+    }
+  }
+  return cond;
+}
 
 /**
   @} (end of group Query_Optimizer)

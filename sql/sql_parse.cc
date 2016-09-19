@@ -768,6 +768,7 @@ void init_update_queries(void)
   sql_command_flags[SQLCOM_INSERT_SELECT]|=   CF_PREOPEN_TMP_TABLES;
   sql_command_flags[SQLCOM_DELETE]|=          CF_PREOPEN_TMP_TABLES;
   sql_command_flags[SQLCOM_DELETE_MULTI]|=    CF_PREOPEN_TMP_TABLES;
+  sql_command_flags[SQLCOM_RENAME_TABLE]|=    CF_PREOPEN_TMP_TABLES;
   sql_command_flags[SQLCOM_REPLACE_SELECT]|=  CF_PREOPEN_TMP_TABLES;
   sql_command_flags[SQLCOM_SELECT]|=          CF_PREOPEN_TMP_TABLES;
   sql_command_flags[SQLCOM_SET_OPTION]|=      CF_PREOPEN_TMP_TABLES;
@@ -1081,9 +1082,20 @@ void do_handle_bootstrap(THD *thd)
 end:
   in_bootstrap= FALSE;
   delete thd;
+  if (!opt_bootstrap)
+  {
+    /*
+      We need to wake up main thread in case of read_init_file().
+      This is not done by THD::~THD() when there are other threads running
+      (binlog background thread, for example). So do it here again.
+    */
+    mysql_mutex_lock(&LOCK_thread_count);
+    mysql_cond_broadcast(&COND_thread_count);
+    mysql_mutex_unlock(&LOCK_thread_count);
+  }
 
 #ifndef EMBEDDED_LIBRARY
-  DBUG_ASSERT(thread_count == 0);
+  DBUG_ASSERT(!opt_bootstrap || thread_count == 0);
   my_thread_end();
   pthread_exit(0);
 #endif
@@ -6347,7 +6359,7 @@ static bool execute_sqlcom_select(THD *thd, TABLE_LIST *all_tables)
     }
   }
   /* Count number of empty select queries */
-  if (!thd->get_sent_row_count())
+  if (!thd->get_sent_row_count() && !res)
     status_var_increment(thd->status_var.empty_queries);
   else
     status_var_add(thd->status_var.rows_sent, thd->get_sent_row_count());
@@ -7232,6 +7244,7 @@ bool check_stack_overrun(THD *thd, long margin,
   if ((stack_used=used_stack(thd->thread_stack,(char*) &stack_used)) >=
       (long) (my_thread_stack_size - margin))
   {
+    thd->is_fatal_error= 1;
     /*
       Do not use stack for the message buffer to ensure correct
       behaviour in cases we have close to no stack left.
@@ -7320,10 +7333,13 @@ void THD::reset_for_next_command()
   /*
     Autoinc variables should be adjusted only for locally executed
     transactions. Appliers and replayers are either processing ROW
-    events or get autoinc variable values from Query_log_event.
+    events or get autoinc variable values from Query_log_event and
+    mysql slave may be processing STATEMENT format events, but he should
+    use autoinc values passed in binlog events, not the values forced by
+    the cluster.
   */
   if (WSREP(thd) && thd->wsrep_exec_mode == LOCAL_STATE &&
-      wsrep_auto_increment_control)
+      !thd->slave_thread && wsrep_auto_increment_control)
   {
     thd->variables.auto_increment_offset=
       global_system_variables.auto_increment_offset;
@@ -7468,22 +7484,30 @@ mysql_new_select(LEX *lex, bool move_down)
       my_error(ER_WRONG_USAGE, MYF(0), "UNION", "INTO");
       DBUG_RETURN(TRUE);
     }
+
+    /*
+      This type of query is not possible in the grammar:
+        SELECT 1 FROM t1 PROCEDURE ANALYSE() UNION ... ;
+
+      But this type of query is still possible:
+        (SELECT 1 FROM t1 PROCEDURE ANALYSE()) UNION ... ;
+      and it's not easy to disallow this grammatically,
+      because there can be any parenthesis nest level:
+        (((SELECT 1 FROM t1 PROCEDURE ANALYSE()))) UNION ... ;
+    */
     if (lex->proc_list.elements!=0)
     {
       my_error(ER_WRONG_USAGE, MYF(0), "UNION",
                "SELECT ... PROCEDURE ANALYSE()");
       DBUG_RETURN(TRUE);
     }
-    if (lex->current_select->order_list.first && !lex->current_select->braces)
-    {
-      my_error(ER_WRONG_USAGE, MYF(0), "UNION", "ORDER BY");
-      DBUG_RETURN(1);
-    }
-    if (lex->current_select->explicit_limit && !lex->current_select->braces)
-    {
-      my_error(ER_WRONG_USAGE, MYF(0), "UNION", "LIMIT");
-      DBUG_RETURN(1);
-    }
+    // SELECT 1 FROM t1 ORDER BY 1 UNION SELECT 1 FROM t1 -- not possible
+    DBUG_ASSERT(!lex->current_select->order_list.first ||
+                lex->current_select->braces);
+    // SELECT 1 FROM t1 LIMIT 1 UNION SELECT 1 FROM t1;   -- not possible
+    DBUG_ASSERT(!lex->current_select->explicit_limit ||
+                lex->current_select->braces);
+
     select_lex->include_neighbour(lex->current_select);
     SELECT_LEX_UNIT *unit= select_lex->master_unit();                              
     if (!unit->fake_select_lex && unit->add_fake_select_lex(lex->thd))
@@ -7744,10 +7768,9 @@ void mysql_parse(THD *thd, char *rawbuf, uint length,
             PROCESSLIST.
           */
           if (found_semicolon && (ulong) (found_semicolon - thd->query()))
-            thd->set_query_inner(thd->query(),
-                                 (uint32) (found_semicolon -
-                                           thd->query() - 1),
-                                 thd->charset());
+            thd->set_query(thd->query(),
+                           (uint32) (found_semicolon - thd->query() - 1),
+                           thd->charset());
           /* Actually execute the query */
           if (found_semicolon)
           {
