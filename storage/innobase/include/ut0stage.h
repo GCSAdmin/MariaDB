@@ -40,6 +40,13 @@ Created Nov 12, 2014 Vasil Dimov
 #include "row0log.h" /* row_log_estimate_work() */
 #include "srv0srv.h" /* ut_stage_alter_t */
 
+#ifdef _WIN32
+static inline double round(double r)
+{
+  return (ulonglong)(r+0.5);
+}
+#endif // _WIN32
+
 #ifdef HAVE_PSI_STAGE_INTERFACE
 
 typedef void PSI_stage_progress;

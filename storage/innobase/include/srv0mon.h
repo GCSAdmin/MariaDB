@@ -36,7 +36,9 @@ Created 12/15/2009	Jimmy Yang
 #define __STDC_LIMIT_MACROS
 #endif /* __STDC_LIMIT_MACROS */
 
+#ifndef _WIN32 
 #include <stdint.h>
+#endif
 
 #ifndef UNIV_HOTBACKUP
 

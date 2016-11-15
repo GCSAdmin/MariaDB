@@ -498,6 +498,7 @@ int TP_pool_win::init()
   /*
     Control stack size (OS must be Win7 or later)
   */
+#if _MSC_VER >=1600
   if (SetThreadpoolStackInformation)
   {
     TP_POOL_STACK_INFORMATION stackinfo;
@@ -509,6 +510,7 @@ int TP_pool_win::init()
         "SetThreadpoolStackInformation");
     }
   }
+#endif
   return 0;
 }
 

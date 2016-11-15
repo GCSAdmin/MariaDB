@@ -114,10 +114,12 @@ support cross-platform development and expose comonly used SQL names. */
 # ifndef UNIV_HOTBACKUP
 #  include "my_config.h"
 # endif /* UNIV_HOTBACKUP */
-#endif
-
 #include <stdint.h>
 #include <inttypes.h>
+#else
+typedef unsigned long long int uintmax_t;
+#endif
+
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -495,6 +497,14 @@ macro ULINTPF. */
 # define UINT64scan     "llu"
 typedef unsigned __int64 ib_uint64_t;
 typedef unsigned __int32 ib_uint32_t;
+typedef unsigned __int64 uint64_t;
+typedef __int64 int64_t;
+typedef unsigned __int32 uint32_t;
+typedef __int32 int32_t;
+typedef unsigned __int16 uint16_t;
+typedef __int16 int16_t;
+typedef unsigned __int8 uint8_t;
+typedef __int8 int8_t;
 #else
 # define UINT32PF	"%u"
 #if SIZEOF_LONG == 8
