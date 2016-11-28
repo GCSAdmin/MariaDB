@@ -6329,14 +6329,14 @@ row_col_compress_alloc(/* return the compressed data */
 			*complen = len + 1;
 			return compbuf;
 		}
-    else if(*complen > len)
-    {/* if the length is longer after compression */
-      row_col_compress_head_write(&head, 0, 0, 0);
-      memcpy(compbuf, &head, 1);
-      memcpy(compbuf+1, packet, len);
-      *complen = len + 1;
-      return compbuf;
-    }
+		else if(*complen > len)
+		{/* if the length is longer after compression */
+			row_col_compress_head_write(&head, 0, 0, 0);
+			memcpy(compbuf, &head, 1);
+			memcpy(compbuf+1, packet, len);
+			*complen = len + 1;
+			return compbuf;
+		}
 		else
 		{/* normal compression */
 			row_col_compress_head_write(&head, 1, n, 0);
@@ -6396,20 +6396,20 @@ row_col_decompress(
 		compress_len = len - 1 - data_byte;
 		ut_a(compress_len > 0);
 		tmp_complen = (uint) data_len;
-
-    switch(algo_type)
-    {
-    case 0:
-      // zlib
-      result = uncompress((Bytef*) data, &tmp_complen, (Bytef*) (packet+1+data_byte), (uLong) compress_len);
-      if(result != Z_OK)
-        return NULL;
-      break;
-    default:
-      //TODO
-      //bad algorithm
-      return NULL;
-    }
+		
+		switch(algo_type)
+		{
+		case 0:
+			// zlib
+			result = uncompress((Bytef*) data, &tmp_complen, (Bytef*) (packet+1+data_byte), (uLong) compress_len);
+			if(result != Z_OK)
+			return NULL;
+			break;
+		default:
+		//TODO
+		//bad algorithm
+			return NULL;
+		}
 		ut_a(data_len == tmp_complen);
 		*complen = data_len;
 	}
